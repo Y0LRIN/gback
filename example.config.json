@@ -1,0 +1,43 @@
+{
+  "network": {
+    "common_mac": "00:11:22:33:44:55",
+    "ping_timeout": 1,
+    "ssh_timeout": 2,
+    "boot_wait": 10
+  },
+  "defaults": {
+    "debug": false,
+    "encryption_enabled": false,
+    "incremental": false,
+    "use_colors": true,
+    "show_progress": true,
+    "progress_width": 50
+  },
+  "backup": {
+    "backup_root": "/home/user/backup/",
+    "log_dir": "/home/user/backup_logs",
+    "retention_days": 120
+  },
+  "encryption": {
+    "default_recipient": "your@email.com"
+  },
+  "ssh_config": {
+    "user": "user",
+    "key_path": "path/to/your/key",
+    "port": 22
+  },
+  "scheduling": {
+    "default_time": "02:00"
+  },
+  "server_ips": [
+    {
+      "ip": "192.168.1.100",
+      "desc": "Home Server",
+      "mac": "11:22:33:44:55:66"
+    },
+    {
+      "ip": "192.168.1.101",
+      "desc": "Office Server"
+    }
+  ]
+}

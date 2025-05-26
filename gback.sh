@@ -1,6 +1,16 @@
 #!/bin/bash
 # gback.sh - Comprehensive backup utility with encryption and scheduling support
-#
+
+# Initialize DEBUG early to prevent errors
+DEBUG=0
+
+# Debug function - only prints when DEBUG is enabled
+debug() {
+    if [ "$DEBUG" -eq 1 ]; then
+        echo "DEBUG: $*"
+    fi
+}
+
 # Features:
 # - Remote backup with automatic server discovery
 # - Wake-on-LAN for offline servers
@@ -22,35 +32,106 @@
 # Created: 2025-05-17
 # Version: 1.0
 
+# ================ LOAD CONFIGURATION ================
+CONFIG_FILE="$(dirname "$(readlink -f "$0")")/gback.config.json"
+DEFAULT_CONFIG_FILE="$(dirname "$(readlink -f "$0")")/example.config.json"
+
+
+# Use default config if user config doesn't exist
+if [ ! -f "$CONFIG_FILE" ] && [ -f "$DEFAULT_CONFIG_FILE" ]; then
+  CONFIG_FILE="$DEFAULT_CONFIG_FILE"
+fi
+
+# Debug output for configuration
+debug "Config file contents:"
+if [ "$DEBUG" -eq 1 ] && [ -f "$CONFIG_FILE" ]; then
+    head -10 "$CONFIG_FILE"
+fi
+
+# Function to read configuration values
+read_config() {
+  local key="$1"
+  local default="$2"
+  
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo "$default"
+    return
+  fi
+  
+  if command -v jq &>/dev/null; then
+    value=$(jq -r "$key" "$CONFIG_FILE" 2>/dev/null)
+    if [[ "$value" == "null" ]]; then
+      echo "$default"
+    else
+      echo "$value"
+    fi
+  else
+    # Python fallback
+    value=$(python3 -c "
+import json, sys
+try:
+    with open('$CONFIG_FILE', 'r') as f:
+        data = json.load(f)
+    key_parts = '$key'.strip('.').split('.')
+    result = data
+    for part in key_parts:
+        if part in result:
+            result = result[part]
+        else:
+            result = None
+            break
+    if result is None:
+        print('$default')
+    else:
+        print(result)
+except Exception:
+    print('$default')
+")
+    echo "$value"
+  fi
+}
+
 # ================ DEFAULT SETTINGS ================
 # Network timeouts and wait periods
-PING_TIMEOUT=1      # Seconds to wait for ping response
-SSH_TIMEOUT=2       # Seconds to wait for SSH connection
-BOOT_WAIT=10        # Seconds to wait after wake-on-LAN
+PING_TIMEOUT=$(read_config ".network.ping_timeout" "1")
+SSH_TIMEOUT=$(read_config ".network.ssh_timeout" "2")
+BOOT_WAIT=$(read_config ".network.boot_wait" "10")
 
 # Feature flags
-DEBUG=0             # Verbose debugging output
-RESTORE_MODE=0      # Restore instead of backup
-ENCRYPTION_ENABLED=0  # Use GPG encryption
-INCREMENTAL=0       # Use incremental backup strategy
-USE_COLORS=1        # Enable colorized output
-SHOW_PROGRESS=1     # Show progress bars
+DEBUG=$(read_config ".defaults.debug" "0")
+[ "$DEBUG" = "true" ] && DEBUG=1 || DEBUG=0
+RESTORE_MODE=0  # Always start in backup mode
+ENCRYPTION_ENABLED=$(read_config ".defaults.encryption_enabled" "0")
+[ "$ENCRYPTION_ENABLED" = "true" ] && ENCRYPTION_ENABLED=1 || ENCRYPTION_ENABLED=0
+INCREMENTAL=$(read_config ".defaults.incremental" "0")
+[ "$INCREMENTAL" = "true" ] && INCREMENTAL=1 || INCREMENTAL=0
+USE_COLORS=$(read_config ".defaults.use_colors" "1")
+[ "$USE_COLORS" = "true" ] && USE_COLORS=1 || USE_COLORS=0
+SHOW_PROGRESS=$(read_config ".defaults.show_progress" "1")
+[ "$SHOW_PROGRESS" = "true" ] && SHOW_PROGRESS=1 || SHOW_PROGRESS=0
 
 # Manual server selection
 MANUAL_IP=""        # IP address when manually specified
 SERVER_ID=""        # Server ID when selecting from config file
 
 # Encryption settings
-GPG_RECIPIENT=""    # GPG key or email for encryption
+GPG_RECIPIENT=$(read_config ".encryption.default_recipient" "")
 
 # Backup target settings
-BACKUP_ROOT="/home/adm1/backup/pc_files"  # Root directory for backups on server
-PROGRESS_WIDTH=50   # Width of progress bar in characters
+BACKUP_ROOT=$(read_config ".backup.backup_root" "/home/adm1/backup/pc_files")
+LOG_DIR=$(read_config ".backup.log_dir" "/home/adm1/backup_logs")
+RETENTION_DAYS=$(read_config ".backup.retention_days" "120")
+PROGRESS_WIDTH=$(read_config ".defaults.progress_width" "50")
+
+# SSH settings
+SSH_USER=$(read_config ".ssh_config.user" "adm1")
+SSH_KEY=$(read_config ".ssh_config.key_path" "~/.ssh/id_ed25519")
+SSH_PORT=$(read_config ".ssh_config.port" "22")
 
 # Scheduling settings
 SCHEDULE_MODE=0     # Enable schedule creation mode
 SCHEDULE_INTERVAL="" # Schedule interval (daily, weekly, monthly)
-SCHEDULE_TIME=""    # Time in HH:MM format
+SCHEDULE_TIME=$(read_config ".scheduling.default_time" "02:00")
 SCHEDULE_LIST=0     # List scheduled backups mode
 SCHEDULE_REMOVE=""  # ID of scheduled backup to remove
 
@@ -184,7 +265,7 @@ EXAMPLES
     gback.sh --remove-schedule=1620000000
 
 CONFIGURATION
-    Server configuration is stored in ~/backup_server_ips.json
+    Server configuration is stored in ~/gback.config.json
 
 EOF
     exit 0
@@ -211,11 +292,8 @@ wake_server() {
 
 backup() {
     local source_path="$1"
-    local json_file="$HOME/backup_server_ips.json"
     local timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
-    local log_dir="/home/adm1/backup_logs"  # Use home directory
-    local log_file="${log_dir}/gback_${timestamp}.log"
-    local retention_days=120 # Adjust retention period as needed, default 120 days/3 months
+    local log_file="${LOG_DIR}/gback_${timestamp}.log"
 
     # Add diagnostics for debugging
     debug "Checking source path: $source_path"
@@ -223,8 +301,8 @@ backup() {
         ls -la "$source_path" 2>/dev/null || echo "ls cannot access the file"
     fi
     
-    if [ ! -f "$json_file" ]; then
-        error "Server ip list not found at $json_file"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        error "Server configuration not found at $CONFIG_FILE"
         return 1
     fi
 
@@ -254,7 +332,7 @@ backup() {
     local common_mac=""
 
     if command -v jq &>/dev/null; then
-        common_mac=$(jq -r '.common_mac' "$json_file")
+        common_mac=$(jq -r '.network.common_mac // ""' "$CONFIG_FILE")
         while read -r line; do
             ip=$(echo "$line" | cut -d' ' -f1)
             mac=$(echo "$line" | cut -d' ' -f2)
@@ -264,9 +342,9 @@ backup() {
             else
                 ip_to_mac["$ip"]="$common_mac"
             fi
-        done < <(jq -r '.server_ips[] | "\(.ip) \(.mac // \"\")"' "$json_file")
+        done < <(jq -r '.server_ips[] | "\(.ip) \(.mac // \"\")"' "$CONFIG_FILE")
     else
-        common_mac=$(python3 -c "import json,sys; data=json.load(open('$json_file')); print(data.get('common_mac', ''))")
+        common_mac=$(python3 -c "import json,sys; data=json.load(open('$CONFIG_FILE')); print(data.get('common_mac', ''))")
         while read -r line; do
             ip=$(echo "$line" | cut -d' ' -f1)
             mac=$(echo "$line" | cut -d' ' -f2)
@@ -276,8 +354,11 @@ backup() {
             else
                 ip_to_mac["$ip"]="$common_mac"
             fi
-        done < <(python3 -c "import json,sys; data=json.load(open('$json_file')); print('\n'.join([s['ip'] + ' ' + s.get('mac', '') for s in data['server_ips']]))")
+        done < <(python3 -c "import json,sys; data=json.load(open('$CONFIG_FILE')); print('\n'.join([s['ip'] + ' ' + s.get('mac', '') for s in data['server_ips']]))")
     fi
+
+    debug "Loaded ${#possible_ips[@]} servers from config"
+    debug "Common MAC address: $common_mac"
 
     # Handle manual IP or ID selection
     if [ -n "$MANUAL_IP" ]; then
@@ -288,7 +369,7 @@ backup() {
             ip_to_mac["$target_ip"]="$common_mac"
         fi
     elif [ -n "$SERVER_ID" ]; then
-        target_ip=$(get_server_by_id "$json_file" "$SERVER_ID")
+        target_ip=$(get_server_by_id "$CONFIG_FILE" "$SERVER_ID")
         if [ $? -ne 0 ] || [ -z "$target_ip" ]; then
             echo "ERROR: Failed to get server by ID $SERVER_ID"
             return 1
@@ -299,14 +380,18 @@ backup() {
         local target_ip=""
         echo "Searching for backup server..."
         for ip in "${possible_ips[@]}"; do
-            echo "Trying $ip..."
+            debug "Trying server: $ip"
             if ! ping -c $PING_TIMEOUT -W $PING_TIMEOUT "$ip" &>/dev/null; then
+                debug "Server $ip not responding to ping"
                 if [[ -n "${ip_to_mac[$ip]}" ]]; then
-                    echo "Server not responding. Attempting to wake it..."
+                    debug "Attempting wake-on-LAN for $ip with MAC ${ip_to_mac[$ip]}"
                     wake_server "${ip_to_mac[$ip]}" "$ip"
                 fi
+            else
+                debug "Server $ip responded to ping"
             fi
-            if timeout $SSH_TIMEOUT ssh -i ~/.ssh/id_ed25519 -o ConnectTimeout=$SSH_TIMEOUT -o StrictHostKeyChecking=no "adm1@$ip" "hostname" &>/dev/null; then
+            # Update server discovery check in backup() function
+            if timeout $SSH_TIMEOUT ssh -i "$SSH_KEY" -p "$SSH_PORT" -o ConnectTimeout=$SSH_TIMEOUT -o StrictHostKeyChecking=no "${SSH_USER}@$ip" "hostname" &>/dev/null; then
                 target_ip="$ip"
                 echo "Found backup server at $target_ip"
                 break
@@ -327,25 +412,23 @@ backup() {
             wake_server "${ip_to_mac[$target_ip]}" "$target_ip"
         fi
         
-        if ! timeout $SSH_TIMEOUT ssh -i ~/.ssh/id_ed25519 -o ConnectTimeout=$SSH_TIMEOUT -o StrictHostKeyChecking=no "adm1@$target_ip" "hostname" &>/dev/null; then
+        if ! timeout $SSH_TIMEOUT ssh -i "$SSH_KEY" -p "$SSH_PORT" -o ConnectTimeout=$SSH_TIMEOUT -o StrictHostKeyChecking=no "${SSH_USER}@$target_ip" "hostname" &>/dev/null; then
             echo "ERROR: Could not connect to server at $target_ip"
             return 1
         fi
     fi
 
     # Create log directory if it doesn't exist
-    ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "mkdir -p $log_dir ${BACKUP_ROOT}" || {
-        echo "ERROR: Could not create log directory on backup server"
-    }
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "mkdir -p $LOG_DIR || sudo mkdir -p $LOG_DIR"
 
     # Fix the log command to properly escape variables
     hostname=$(hostname)
     source_type=$([ "$is_directory" = true ] && echo "directory" || echo "file")
 
-    # Use single quotes around variables meant to be expanded on the remote side
-    ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo '===== Backup started at $(date) =====' > $log_file && \
+    # Update all log commands
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== Backup started at $(date) =====' > $log_file && \
         echo 'Source: $hostname:$source_path ($source_type)' >> $log_file && \
-        echo 'Target: $target_ip:/backup/pc_files/' >> $log_file" || {
+        echo 'Target: $target_ip:$BACKUP_ROOT/' >> $log_file" || {
         echo "ERROR: Could not log backup operation on backup server"
     }
 
@@ -382,10 +465,10 @@ backup() {
         fi
         
         echo "Data encrypted successfully. Uploading encrypted file..."
-        # Upload the encrypted file instead of the original
-        if ! rsync -azv --progress -e "ssh -i ~/.ssh/id_ed25519" "$encrypted_file" "adm1@$target_ip:${BACKUP_ROOT}/$(basename "$source_path").gpg"; then
+        # Update rsync commands for encrypted backups
+        if ! rsync -azv --progress -e "ssh -i '$SSH_KEY' -p '$SSH_PORT'" "$encrypted_file" "${SSH_USER}@$target_ip:${BACKUP_ROOT}/$(basename "$source_path").gpg"; then
             echo "ERROR: Backup failed"
-            ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo 'ERROR: Encrypted backup failed at $(date)' >> $log_file"
+            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'ERROR: Encrypted backup failed at $(date)' >> $log_file"
             rm -rf "$temp_dir"
             return 1
         fi
@@ -393,7 +476,7 @@ backup() {
         # Clean up
         rm -rf "$temp_dir"
         echo "Encrypted backup completed successfully"
-        ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo 'SUCCESS: Encrypted backup completed at $(date)' >> $log_file"
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'SUCCESS: Encrypted backup completed at $(date)' >> $log_file"
     else
         # Original rsync command for unencrypted backup
         echo "Backing up to server at $target_ip..."
@@ -405,71 +488,68 @@ backup() {
             local latest_link="${BACKUP_ROOT}/latest"
             
             echo "Creating incremental backup directory structure on server..."
-            ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "mkdir -p ${backup_dir}"
+            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "mkdir -p ${backup_dir}"
             
             # Check if we have a previous backup to reference
-            if ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "[ -L ${latest_link} ]"; then
+            if ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "[ -L ${latest_link} ]"; then
                 echo "Found previous backup, performing incremental backup..."
+                # Update rsync commands for incremental backups
                 if ! rsync -azv --delete --progress --info=progress2 --stats \
                     --link-dest="${latest_link}" \
-                    -e "ssh -i ~/.ssh/id_ed25519" \
-                    "$source_path" "adm1@$target_ip:${backup_dir}"; then
+                    -e "ssh -i '$SSH_KEY' -p '$SSH_PORT'" \
+                    "$source_path" "${SSH_USER}@$target_ip:${backup_dir}"; then
                     echo "ERROR: Incremental backup failed"
                     return 1
                 fi
             else
                 echo "No previous backup found, performing full backup..."
                 if ! rsync -azv --delete --progress --info=progress2 --stats \
-                    -e "ssh -i ~/.ssh/id_ed25519" \
-                    "$source_path" "adm1@$target_ip:${backup_dir}"; then
+                    -e "ssh -i '$SSH_KEY' -p '$SSH_PORT'" \
+                    "$source_path" "${SSH_USER}@$target_ip:${backup_dir}"; then
                     echo "ERROR: Incremental backup failed"
                     return 1
                 fi
             fi
             
             # Update the latest link to point to this backup
-            ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "rm -f ${latest_link} && ln -s ${backup_dir} ${latest_link}"
+            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "rm -f ${latest_link} && ln -s ${backup_dir} ${latest_link}"
             echo "Incremental backup completed successfully"
         else
-            if ! rsync -azv --delete --progress -e "ssh -i ~/.ssh/id_ed25519" "$source_path" "adm1@$target_ip:/backup/pc_files/"; then
+            # Update rsync commands for normal backups
+            if ! rsync -azv --delete --progress -e "ssh -i '$SSH_KEY' -p '$SSH_PORT'" "$source_path" "${SSH_USER}@$target_ip:${BACKUP_ROOT}/"; then
                 echo "ERROR: Backup failed"
-                ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo 'ERROR: Backup failed at $(date)' >> $log_file"
+                ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'ERROR: Backup failed at $(date)' >> $log_file"
                 return 1
             else
                 echo "Backup completed successfully"
-                ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo 'SUCCESS: Backup completed at $(date)' >> $log_file"
+                ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'SUCCESS: Backup completed at $(date)' >> $log_file"
             fi
         fi
     fi
 
     echo "Verifying backup..."
-    if ! ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "ls -la ${BACKUP_ROOT}/$(basename "$source_path")" &>/dev/null; then
+    if ! ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "ls -la ${BACKUP_ROOT}/$(basename "$source_path")" &>/dev/null; then
         echo "WARNING: Backup verification failed"
-        ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo 'WARNING: Backup verification failed' >> $log_file"
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'WARNING: Backup verification failed' >> $log_file"
     else 
         echo "Backup verification successful"
-        ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo 'Backup verification successful' >> $log_file"
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'Backup verification successful' >> $log_file"
     fi
 
     # Log file sizes and summary
-    ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo '===== Backup summary =====' >> $log_file && \
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== Backup summary =====' >> $log_file && \
         du -sh ${BACKUP_ROOT}/$(basename "$source_path") >> $log_file && \
         echo '===== End of backup log =====' >> $log_file"
 
     # Clean up old log files
-    echo "Cleaning up old log files (older than $retention_days days)..."
-    ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "find $log_dir -name \"backup_*.log\" -type f -mtime +$retention_days -delete" || {
-        echo "WARNING: Could not clean up old log files"
-    }
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "find ${LOG_DIR} -name \"backup_*.log\" -type f -mtime +${RETENTION_DAYS} -delete"
 }
 
 restore() {
     local backup_path="$1"
     local target_path="$2"
-    local json_file="$HOME/backup_server_ips.json"
     local timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
-    local log_dir="/home/adm1/backup_logs"
-    local log_file="${log_dir}/restore_${timestamp}.log"
+    local log_file="${LOG_DIR}/restore_${timestamp}.log"
 
     # Check arguments
     if [ -z "$backup_path" ] || [ -z "$target_path" ]; then
@@ -479,8 +559,8 @@ restore() {
     fi
 
     # Check if JSON configuration exists
-    if [ ! -f "$json_file" ]; then
-        error "Server ip list not found at $json_file"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        error "Server ip list not found at $CONFIG_FILE"
         return 1
     fi
 
@@ -499,7 +579,7 @@ restore() {
     local common_mac=""
 
     if command -v jq &>/dev/null; then
-        common_mac=$(jq -r '.common_mac' "$json_file")
+        common_mac=$(jq -r '.network.common_mac // ""' "$CONFIG_FILE")
         while read -r line; do
             ip=$(echo "$line" | cut -d' ' -f1)
             mac=$(echo "$line" | cut -d' ' -f2)
@@ -509,9 +589,9 @@ restore() {
             else
                 ip_to_mac["$ip"]="$common_mac"
             fi
-        done < <(jq -r '.server_ips[] | "\(.ip) \(.mac // \"\")"' "$json_file")
+        done < <(jq -r '.server_ips[] | "\(.ip) \(.mac // \"\")"' "$CONFIG_FILE")
     else
-        common_mac=$(python3 -c "import json,sys; data=json.load(open('$json_file')); print(data.get('common_mac', ''))")
+        common_mac=$(python3 -c "import json,sys; data=json.load(open('$CONFIG_FILE')); print(data.get('common_mac', ''))")
         while read -r line; do
             ip=$(echo "$line" | cut -d' ' -f1)
             mac=$(echo "$line" | cut -d' ' -f2)
@@ -521,7 +601,7 @@ restore() {
             else
                 ip_to_mac["$ip"]="$common_mac"
             fi
-        done < <(python3 -c "import json,sys; data=json.load(open('$json_file')); print('\n'.join([s['ip'] + ' ' + s.get('mac', '') for s in data['server_ips']]))")
+        done < <(python3 -c "import json,sys; data=json.load(open('$CONFIG_FILE')); print('\n'.join([s['ip'] + ' ' + s.get('mac', '') for s in data['server_ips']]))")
     fi
 
     # Handle manual IP or ID selection
@@ -533,7 +613,7 @@ restore() {
             ip_to_mac["$target_ip"]="$common_mac"
         fi
     elif [ -n "$SERVER_ID" ]; then
-        target_ip=$(get_server_by_id "$json_file" "$SERVER_ID")
+        target_ip=$(get_server_by_id "$CONFIG_FILE" "$SERVER_ID")
         if [ $? -ne 0 ] || [ -z "$target_ip" ]; then
             echo "ERROR: Failed to get server by ID $SERVER_ID"
             return 1
@@ -551,7 +631,8 @@ restore() {
                     wake_server "${ip_to_mac[$ip]}" "$ip"
                 fi
             fi
-            if timeout $SSH_TIMEOUT ssh -i ~/.ssh/id_ed25519 -o ConnectTimeout=$SSH_TIMEOUT -o StrictHostKeyChecking=no "adm1@$ip" "hostname" &>/dev/null; then
+            # Update server discovery check in backup() function
+            if timeout $SSH_TIMEOUT ssh -i "$SSH_KEY" -p "$SSH_PORT" -o ConnectTimeout=$SSH_TIMEOUT -o StrictHostKeyChecking=no "${SSH_USER}@$ip" "hostname" &>/dev/null; then
                 target_ip="$ip"
                 echo "Found backup server at $target_ip"
                 break
@@ -566,21 +647,19 @@ restore() {
     fi
 
     # Create log directory if it doesn't exist
-    ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "mkdir -p $log_dir || sudo mkdir -p $log_dir; chmod 755 $log_dir || sudo chmod 755 $log_dir" || {
-        echo "ERROR: Could not create log directory on backup server"
-    }
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "mkdir -p $LOG_DIR || sudo mkdir -p $LOG_DIR"
 
     # Check if the backup exists
     echo "Verifying backup exists..."
     local backup_full_path="${BACKUP_ROOT}/$backup_path"
-    if ! ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "test -e '$backup_full_path'"; then
+    if ! ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "test -e '$backup_full_path'"; then
         echo "ERROR: Backup '$backup_path' not found on server"
         return 1
     fi
 
     # Log start of restore
     hostname=$(hostname)
-    ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo '===== Restore started at $(date) =====' > $log_file && \
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== Restore started at $(date) =====' > $log_file && \
         echo 'Source: $target_ip:$backup_full_path' >> $log_file && \
         echo 'Target: $hostname:$target_path' >> $log_file" || {
         echo "ERROR: Could not log restore operation on backup server"
@@ -602,7 +681,7 @@ restore() {
         
         echo "Looking for encrypted file: $server_file_path"
         # Download the encrypted file
-        if ! rsync -azv --progress -e "ssh -i ~/.ssh/id_ed25519" "adm1@$target_ip:$server_file_path" "$encrypted_file"; then
+        if ! rsync -azv --progress -e "ssh -i '$SSH_KEY' -p '$SSH_PORT'" "${SSH_USER}@$target_ip:$server_file_path" "$encrypted_file"; then
             echo "ERROR: Failed to download encrypted backup"
             rm -rf "$temp_dir"
             return 1
@@ -644,13 +723,14 @@ restore() {
     else
         # Original restore command for unencrypted backups
         echo "Restoring from server at $target_ip..."
-        if ! rsync -azv --progress -e "ssh -i ~/.ssh/id_ed25519" "adm1@$target_ip:$backup_full_path" "$target_path"; then
+        # Update rsync commands for normal backups
+        if ! rsync -azv --progress -e "ssh -i '$SSH_KEY' -p '$SSH_PORT'" "${SSH_USER}@$target_ip:$backup_full_path" "$target_path"; then
             echo "ERROR: Restore failed"
-            ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo 'ERROR: Restore failed at $(date)' >> $log_file"
+            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'ERROR: Restore failed at $(date)' >> $log_file"
             return 1
         else
             echo "Restore completed successfully"
-            ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo 'SUCCESS: Restore completed at $(date)' >> $log_file"
+            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'SUCCESS: Restore completed at $(date)' >> $log_file"
         fi
     fi
 
@@ -665,36 +745,34 @@ restore() {
 
     if [ ! -e "$verify_path" ]; then
         echo "WARNING: Restore verification failed"
-        ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo 'WARNING: Restore verification failed' >> $log_file"
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'WARNING: Restore verification failed' >> $log_file"
     else 
         echo "Restore verification successful"
-        ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo 'Restore verification successful' >> $log_file"
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'Restore verification successful' >> $log_file"
     fi
 
     # Update the log file sizes command to use the correct verify_path
     # First verify log directory exists
-    ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "mkdir -p $(dirname $log_file)"
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "mkdir -p $(dirname $log_file)"
     
     # Log the restore summary
-    ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo '===== Restore summary =====' >> $log_file"
-    ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo 'Local size:' >> $log_file"
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== Restore summary =====' >> $log_file"
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'Local size:' >> $log_file"
     
     # Get the local size and send to log
     if [ -e "$verify_path" ]; then
         local size_output=$(du -sh "$verify_path" 2>/dev/null)
         if [ -n "$size_output" ]; then
-            ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo '$size_output' >> $log_file"
+            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '$size_output' >> $log_file"
         else
-            ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo 'Unable to determine size' >> $log_file"
+            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'Unable to determine size' >> $log_file"
         fi
     else
-        ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo 'File not found' >> $log_file"
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'File not found' >> $log_file"
     fi
     
     # Complete the log
-    ssh -i ~/.ssh/id_ed25519 "adm1@$target_ip" "echo '===== End of restore log =====' >> $log_file"
-
-    echo "Restore from '$backup_path' to '$target_path' completed."
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== End of restore log =====' >> $log_file"
 }
 
 # Add this new function to get server IP by ID
@@ -726,16 +804,19 @@ try:
     with open('$json_file', 'r') as f:
         data = json.load(f)
     if $id < 1 or $id > len(data['server_ips']):
-        print(f'ERROR: Server ID must be between 1 and {len(data[\"server_ips\"])}', file=sys.stderr)
+        print('ERROR: Server ID must be between 1 and ' + str(len(data['server_ips'])))
         sys.exit(1)
-    print(data['server_ips'][$id-1]['ip'])
+    ip = data['server_ips'][$id-1]['ip']
+    print(ip)
 except Exception as e:
-    print(f'ERROR: {str(e)}', file=sys.stderr)
+    print('ERROR: ' + str(e))
     sys.exit(1)
 ")
     fi
     
+    # Check if IP was found
     if [ -z "$ip" ]; then
+        echo "ERROR: No IP found for server ID $id"
         return 1
     fi
     
@@ -745,35 +826,33 @@ except Exception as e:
 
 # Add this new function to list servers
 list_servers() {
-    local json_file="$HOME/backup_server_ips.json"
-    
-    if [ ! -f "$json_file" ]; then
-        echo "ERROR: Server IP list not found at $json_file"
-        return 1
-    fi
-    
-    echo "Available backup servers:"
-    echo "------------------------"
-    
-    if command -v jq &>/dev/null; then
-        local counter=1
-        while read -r line; do
-            ip=$(echo "$line" | cut -d'|' -f1)
-            desc=$(echo "$line" | cut -d'|' -f2)
-            echo "  $counter) $ip - $desc"
-            ((counter++))
-        done < <(jq -r '.server_ips[] | "\(.ip)|\(.desc)"' "$json_file")
-    else
-        local counter=1
-        while read -r line; do
-            ip=$(echo "$line" | cut -d'|' -f1)
-            desc=$(echo "$line" | cut -d'|' -f2)
-            echo "  $counter) $ip - $desc"
-            ((counter++))
-        done < <(python3 -c "import json,sys; data=json.load(open('$json_file')); print('\n'.join([s['ip'] + '|' + s.get('desc', '') for s in data['server_ips']]))")
-    fi
-    
-    return 0
+        # Use the global CONFIG_FILE variable instead of hardcoding
+        
+        if [ ! -f "$CONFIG_FILE" ]; then
+            echo "ERROR: Server IP list not found at $CONFIG_FILE"
+            return 1
+        fi
+        
+        echo "Available backup servers:"
+        echo "------------------------"
+        
+        if command -v jq &>/dev/null; then
+            local counter=1
+            while read -r line; do
+                ip=$(echo "$line" | cut -d'|' -f1)
+                desc=$(echo "$line" | cut -d'|' -f2)
+                echo "  $counter) $ip - $desc"
+                ((counter++))
+            done < <(jq -r '.server_ips[] | "\(.ip)|\(.desc)"' "$CONFIG_FILE")
+        else
+            local counter=1
+            while read -r line; do
+                ip=$(echo "$line" | cut -d'|' -f1)
+                desc=$(echo "$line" | cut -d'|' -f2)
+                echo "  $counter) $ip - $desc"
+                ((counter++))
+            done < <(python3 -c "import json,sys; data=json.load(open('$CONFIG_FILE')); print('\n'.join([s['ip'] + '|' + s.get('desc', '') for s in data['server_ips']]))")
+        fi
 }
 
 # Add this new function for handling scheduled backups
@@ -1125,3 +1204,11 @@ if [ "$SCHEDULE_MODE" -eq 1 ]; then
         exit $?
     fi
 fi
+debug "Configuration loaded:"
+debug "  BACKUP_ROOT=$BACKUP_ROOT"
+debug "  LOG_DIR=$LOG_DIR"
+debug "  SSH_USER=$SSH_USER"
+debug "  SSH_KEY=$SSH_KEY"
+debug "  SSH_PORT=$SSH_PORT"
+debug "  GPG_RECIPIENT=$GPG_RECIPIENT"
+debug "  RETENTION_DAYS=$RETENTION_DAYS"
