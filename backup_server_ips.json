@@ -1,0 +1,18 @@
+{
+    "common_mac": "08:00:27:73:3B:D8",
+    "ssh_config": {
+        "user": "adm1",
+        "key_path": "~/.ssh/id_ed25519",
+        "backup_path": "/backup/pc_files"
+    },
+    "server_ips": [
+        {
+            "ip": "192.168.114.181",
+            "desc": "Phone Wifi"
+        },
+        {
+            "ip": "192.168.1.170",
+            "desc": "Home Network"
+        }
+    ]
+}
