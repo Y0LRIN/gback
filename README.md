@@ -116,7 +116,7 @@ sudo apt install etherwake  # Ubuntu/Debian only
 
 ```bash
 # Clone or download the project
-git clone <repository-url> gback
+git clone https://github.com/Y0LRIN/gback.git
 cd gback
 
 # Make the script executable
