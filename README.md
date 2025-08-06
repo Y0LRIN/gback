@@ -2,24 +2,24 @@
 
 > **Secure, automated backups with Wake-on-LAN, encryption, and scheduling support**
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)]()
+[![License](https://img.shields.io/badge/license-GPL%20v3-blue.svg)]()
 [![Shell](https://img.shields.io/badge/shell-bash-green.svg)]()
 [![Version](https://img.shields.io/badge/version-1.0-orange.svg)]()
 
 ## 📋 Table of Contents
 
-- [Overview](#overview)
-- [Features](#features)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Server Setup](#server-setup)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Examples](#examples)
-- [Scheduling](#scheduling)
-- [Encryption](#encryption)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
+- [Overview](#-overview)
+- [Features](#-features)
+- [Prerequisites](#-prerequisites)
+- [Installation](#-installation)
+- [Server Setup](#️-server-setup)
+- [Configuration](#️-configuration)
+- [Usage](#-usage)
+- [Examples](#-examples)
+- [Scheduling](#-scheduling)
+- [Encryption](#-encryption)
+- [Troubleshooting](#️-troubleshooting)
+- [Contributing](#-contributing)
 
 ---
 

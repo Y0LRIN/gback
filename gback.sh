@@ -125,8 +125,22 @@ PROGRESS_WIDTH=$(read_config ".defaults.progress_width" "50")
 
 # SSH settings
 SSH_USER=$(read_config ".ssh_config.user" "adm1")
-SSH_KEY=$(read_config ".ssh_config.key_path" "~/.ssh/id_ed25519")
+SSH_KEY=$(read_config ".ssh_config.key_path" "$HOME/.ssh/id_ed25519")
 SSH_PORT=$(read_config ".ssh_config.port" "22")
+
+# Expand SSH key path if it starts with ~
+if [[ "$SSH_KEY" =~ ^~.* ]]; then
+    SSH_KEY="${SSH_KEY/#~/$HOME}"
+fi
+
+debug "Configuration loaded:"
+debug "  BACKUP_ROOT=$BACKUP_ROOT"
+debug "  LOG_DIR=$LOG_DIR"
+debug "  SSH_USER=$SSH_USER"
+debug "  SSH_KEY=$SSH_KEY"
+debug "  SSH_PORT=$SSH_PORT"
+debug "  GPG_RECIPIENT=$GPG_RECIPIENT"
+debug "  RETENTION_DAYS=$RETENTION_DAYS"
 
 # Scheduling settings
 SCHEDULE_MODE=0     # Enable schedule creation mode
@@ -265,7 +279,7 @@ EXAMPLES
     gback.sh --remove-schedule=1620000000
 
 CONFIGURATION
-    Server configuration is stored in ~/gback.config.json
+    Server configuration is stored in gback.config.json (same directory as script)
 
 EOF
     exit 0
@@ -342,9 +356,9 @@ backup() {
             else
                 ip_to_mac["$ip"]="$common_mac"
             fi
-        done < <(jq -r '.server_ips[] | "\(.ip) \(.mac // \"\")"' "$CONFIG_FILE")
+        done < <(jq -r '.server_ips[] | "\(.ip) \(.mac // "")"' "$CONFIG_FILE")
     else
-        common_mac=$(python3 -c "import json,sys; data=json.load(open('$CONFIG_FILE')); print(data.get('common_mac', ''))")
+        common_mac=$(python3 -c "import json,sys; data=json.load(open('$CONFIG_FILE')); print(data.get('network', {}).get('common_mac', ''))")
         while read -r line; do
             ip=$(echo "$line" | cut -d' ' -f1)
             mac=$(echo "$line" | cut -d' ' -f2)
@@ -426,9 +440,9 @@ backup() {
     source_type=$([ "$is_directory" = true ] && echo "directory" || echo "file")
 
     # Update all log commands
-    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== Backup started at $(date) =====' > $log_file && \
-        echo 'Source: $hostname:$source_path ($source_type)' >> $log_file && \
-        echo 'Target: $target_ip:$BACKUP_ROOT/' >> $log_file" || {
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== Backup started at \$(date) =====' > \"$log_file\" && \
+        echo 'Source: ${hostname}:${source_path} (${source_type})' >> \"$log_file\" && \
+        echo 'Target: ${target_ip}:${BACKUP_ROOT}/' >> \"$log_file\"" || {
         echo "ERROR: Could not log backup operation on backup server"
     }
 
@@ -436,6 +450,12 @@ backup() {
 
     # Add to backup.sh - right before the rsync command in the backup function
     if [ "$ENCRYPTION_ENABLED" -eq 1 ]; then
+        # Validate GPG recipient is set
+        if [ -z "$GPG_RECIPIENT" ]; then
+            error "Encryption enabled but no GPG recipient specified. Use -k option or set default_recipient in config."
+            return 1
+        fi
+        
         echo "Encrypting data before backup..."
         local temp_dir=$(mktemp -d)
         local encrypted_file="${temp_dir}/$(basename "$source_path").gpg"
@@ -468,7 +488,7 @@ backup() {
         # Update rsync commands for encrypted backups
         if ! rsync -azv --progress -e "ssh -i '$SSH_KEY' -p '$SSH_PORT'" "$encrypted_file" "${SSH_USER}@$target_ip:${BACKUP_ROOT}/$(basename "$source_path").gpg"; then
             echo "ERROR: Backup failed"
-            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'ERROR: Encrypted backup failed at $(date)' >> $log_file"
+            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'ERROR: Encrypted backup failed at \$(date)' >> \"$log_file\""
             rm -rf "$temp_dir"
             return 1
         fi
@@ -476,7 +496,7 @@ backup() {
         # Clean up
         rm -rf "$temp_dir"
         echo "Encrypted backup completed successfully"
-        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'SUCCESS: Encrypted backup completed at $(date)' >> $log_file"
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'SUCCESS: Encrypted backup completed at \$(date)' >> \"$log_file\""
     else
         # Original rsync command for unencrypted backup
         echo "Backing up to server at $target_ip..."
@@ -518,31 +538,39 @@ backup() {
             # Update rsync commands for normal backups
             if ! rsync -azv --delete --progress -e "ssh -i '$SSH_KEY' -p '$SSH_PORT'" "$source_path" "${SSH_USER}@$target_ip:${BACKUP_ROOT}/"; then
                 echo "ERROR: Backup failed"
-                ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'ERROR: Backup failed at $(date)' >> $log_file"
+                ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'ERROR: Backup failed at \$(date)' >> \"$log_file\""
                 return 1
             else
                 echo "Backup completed successfully"
-                ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'SUCCESS: Backup completed at $(date)' >> $log_file"
+                ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'SUCCESS: Backup completed at \$(date)' >> \"$log_file\""
             fi
         fi
     fi
 
     echo "Verifying backup..."
-    if ! ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "ls -la ${BACKUP_ROOT}/$(basename "$source_path")" &>/dev/null; then
+    # Check for correct file based on encryption
+    local verify_file
+    if [ "$ENCRYPTION_ENABLED" -eq 1 ]; then
+        verify_file="${BACKUP_ROOT}/$(basename "$source_path").gpg"
+    else
+        verify_file="${BACKUP_ROOT}/$(basename "$source_path")"
+    fi
+    
+    if ! ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "ls -la \"$verify_file\"" &>/dev/null; then
         echo "WARNING: Backup verification failed"
-        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'WARNING: Backup verification failed' >> $log_file"
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'WARNING: Backup verification failed' >> \"$log_file\""
     else 
         echo "Backup verification successful"
-        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'Backup verification successful' >> $log_file"
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'Backup verification successful' >> \"$log_file\""
     fi
 
     # Log file sizes and summary
-    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== Backup summary =====' >> $log_file && \
-        du -sh ${BACKUP_ROOT}/$(basename "$source_path") >> $log_file && \
-        echo '===== End of backup log =====' >> $log_file"
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== Backup summary =====' >> \"$log_file\" && \
+        du -sh \"$verify_file\" >> \"$log_file\" && \
+        echo '===== End of backup log =====' >> \"$log_file\""
 
     # Clean up old log files
-    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "find ${LOG_DIR} -name \"backup_*.log\" -type f -mtime +${RETENTION_DAYS} -delete"
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "find \"$LOG_DIR\" -name \"backup_*.log\" -type f -mtime +${RETENTION_DAYS} -delete"
 }
 
 restore() {
@@ -589,9 +617,9 @@ restore() {
             else
                 ip_to_mac["$ip"]="$common_mac"
             fi
-        done < <(jq -r '.server_ips[] | "\(.ip) \(.mac // \"\")"' "$CONFIG_FILE")
+        done < <(jq -r '.server_ips[] | "\(.ip) \(.mac // "")"' "$CONFIG_FILE")
     else
-        common_mac=$(python3 -c "import json,sys; data=json.load(open('$CONFIG_FILE')); print(data.get('common_mac', ''))")
+        common_mac=$(python3 -c "import json,sys; data=json.load(open('$CONFIG_FILE')); print(data.get('network', {}).get('common_mac', ''))")
         while read -r line; do
             ip=$(echo "$line" | cut -d' ' -f1)
             mac=$(echo "$line" | cut -d' ' -f2)
@@ -659,9 +687,9 @@ restore() {
 
     # Log start of restore
     hostname=$(hostname)
-    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== Restore started at $(date) =====' > $log_file && \
-        echo 'Source: $target_ip:$backup_full_path' >> $log_file && \
-        echo 'Target: $hostname:$target_path' >> $log_file" || {
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== Restore started at \$(date) =====' > \"$log_file\" && \
+        echo 'Source: ${target_ip}:${backup_full_path}' >> \"$log_file\" && \
+        echo 'Target: ${hostname}:${target_path}' >> \"$log_file\"" || {
         echo "ERROR: Could not log restore operation on backup server"
     }
 
@@ -726,11 +754,11 @@ restore() {
         # Update rsync commands for normal backups
         if ! rsync -azv --progress -e "ssh -i '$SSH_KEY' -p '$SSH_PORT'" "${SSH_USER}@$target_ip:$backup_full_path" "$target_path"; then
             echo "ERROR: Restore failed"
-            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'ERROR: Restore failed at $(date)' >> $log_file"
+            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'ERROR: Restore failed at \$(date)' >> \"$log_file\""
             return 1
         else
             echo "Restore completed successfully"
-            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'SUCCESS: Restore completed at $(date)' >> $log_file"
+            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'SUCCESS: Restore completed at \$(date)' >> \"$log_file\""
         fi
     fi
 
@@ -745,34 +773,34 @@ restore() {
 
     if [ ! -e "$verify_path" ]; then
         echo "WARNING: Restore verification failed"
-        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'WARNING: Restore verification failed' >> $log_file"
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'WARNING: Restore verification failed' >> \"$log_file\""
     else 
         echo "Restore verification successful"
-        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'Restore verification successful' >> $log_file"
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'Restore verification successful' >> \"$log_file\""
     fi
 
     # Update the log file sizes command to use the correct verify_path
     # First verify log directory exists
-    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "mkdir -p $(dirname $log_file)"
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "mkdir -p \$(dirname \"$log_file\")"
     
     # Log the restore summary
-    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== Restore summary =====' >> $log_file"
-    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'Local size:' >> $log_file"
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== Restore summary =====' >> \"$log_file\""
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'Local size:' >> \"$log_file\""
     
     # Get the local size and send to log
     if [ -e "$verify_path" ]; then
         local size_output=$(du -sh "$verify_path" 2>/dev/null)
         if [ -n "$size_output" ]; then
-            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '$size_output' >> $log_file"
+            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '$size_output' >> \"$log_file\""
         else
-            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'Unable to determine size' >> $log_file"
+            ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'Unable to determine size' >> \"$log_file\""
         fi
     else
-        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'File not found' >> $log_file"
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo 'File not found' >> \"$log_file\""
     fi
     
     # Complete the log
-    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== End of restore log =====' >> $log_file"
+    ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_USER}@$target_ip" "echo '===== End of restore log =====' >> \"$log_file\""
 }
 
 # Add this new function to get server IP by ID
@@ -1123,7 +1151,13 @@ else
     fi
 fi
 
-# Check args based on mode
+# Validate encryption settings
+if [ "$ENCRYPTION_ENABLED" -eq 1 ] && [ -z "$GPG_RECIPIENT" ]; then
+    error "Encryption enabled but no GPG recipient specified. Use -k option or set default_recipient in config."
+    exit 1
+fi
+
+# Execute based on mode
 if [ "$RESTORE_MODE" -eq 1 ]; then
     # Restore mode requires two paths
     if [ $# -ne 2 ]; then
@@ -1204,11 +1238,3 @@ if [ "$SCHEDULE_MODE" -eq 1 ]; then
         exit $?
     fi
 fi
-debug "Configuration loaded:"
-debug "  BACKUP_ROOT=$BACKUP_ROOT"
-debug "  LOG_DIR=$LOG_DIR"
-debug "  SSH_USER=$SSH_USER"
-debug "  SSH_KEY=$SSH_KEY"
-debug "  SSH_PORT=$SSH_PORT"
-debug "  GPG_RECIPIENT=$GPG_RECIPIENT"
-debug "  RETENTION_DAYS=$RETENTION_DAYS"
