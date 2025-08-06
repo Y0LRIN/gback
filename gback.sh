@@ -33,13 +33,38 @@ debug() {
 # Version: 1.0
 
 # ================ LOAD CONFIGURATION ================
-CONFIG_FILE="$(dirname "$(readlink -f "$0")")/gback.config.json"
-DEFAULT_CONFIG_FILE="$(dirname "$(readlink -f "$0")")/example.config.json"
+# Look for config files in order of preference:
+# 1. User's local config in same directory as script
+# 2. User's home directory
+# 3. System-wide config (for AUR package)
+# 4. Example config in same directory
 
+LOCAL_CONFIG="$(dirname "$(readlink -f "$0")")/gback.config.json"
+HOME_CONFIG="$HOME/.config/gback/gback.config.json" 
+SYSTEM_CONFIG="/etc/gback/gback.config.json"
+EXAMPLE_CONFIG="$(dirname "$(readlink -f "$0")")/example.config.json"
 
-# Use default config if user config doesn't exist
-if [ ! -f "$CONFIG_FILE" ] && [ -f "$DEFAULT_CONFIG_FILE" ]; then
-  CONFIG_FILE="$DEFAULT_CONFIG_FILE"
+CONFIG_FILE=""
+
+if [ -f "$LOCAL_CONFIG" ]; then
+    CONFIG_FILE="$LOCAL_CONFIG"
+elif [ -f "$HOME_CONFIG" ]; then
+    CONFIG_FILE="$HOME_CONFIG"
+elif [ -f "$SYSTEM_CONFIG" ]; then
+    CONFIG_FILE="$SYSTEM_CONFIG"
+elif [ -f "$EXAMPLE_CONFIG" ]; then
+    CONFIG_FILE="$EXAMPLE_CONFIG"
+else
+    echo "ERROR: No configuration file found. Looked for:"
+    echo "  1. $LOCAL_CONFIG"
+    echo "  2. $HOME_CONFIG"
+    echo "  3. $SYSTEM_CONFIG"
+    echo "  4. $EXAMPLE_CONFIG"
+    echo ""
+    echo "Please create a configuration file. You can copy the example:"
+    echo "  mkdir -p ~/.config/gback"
+    echo "  cp /etc/gback/gback.config.json ~/.config/gback/gback.config.json"
+    exit 1
 fi
 
 # Debug output for configuration
