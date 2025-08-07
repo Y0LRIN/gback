@@ -15,7 +15,7 @@ optdepends=('jq: for JSON configuration parsing (recommended)'
 backup=('etc/gback/gback.config.json')
 install=gback.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('ad696399ffc12aa9f81769501e52a5a22c7465242c44e50d171acd44dbaff879')
 
 package() {
     cd "$srcdir/$pkgname-$pkgver"
